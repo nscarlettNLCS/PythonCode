@@ -272,7 +272,14 @@ button{font:inherit;color:inherit}
 .sheet th,.sheet td{border-bottom:1px solid var(--rule);padding:6px 8px;text-align:left}
 .sheet td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .sheet .row{display:flex;gap:9px;flex-wrap:wrap}
-.pick{display:flex;flex-direction:column;gap:8px;margin:1.1em 0 0}
+.fieldlab{font-size:13.5px;font-weight:600;margin:0 0 .35em;display:block}
+.field{
+  width:100%;font:inherit;padding:9px 11px;border:1px solid var(--rule);
+  border-radius:var(--rad);outline:none;
+}
+.field:focus{border-color:var(--act)}
+.warn{color:#c0392b;font-size:13.5px;margin:.8em 0 0}
+.pick{display:flex;flex-direction:column;gap:8px;margin:0}
 .pick button{
   text-align:left;border:1px solid var(--rule);background:var(--paper);
   border-radius:var(--rad);padding:11px 14px;cursor:pointer;font-size:15px;
@@ -533,7 +540,7 @@ const BOOK = JSON.parse(document.getElementById("bookdata").textContent);
 const $ = id => document.getElementById(id);
 
 /* ================= flatten ================= */
-const SECTIONS = [], BY_ID = {}, SECTION_OF = {};
+const SECTIONS = [], BY_ID = {}, SECTION_OF = {}, SECTION_SIZE = {};
 (function flat(node, secName){
   for (const c of node.children || []) {
     if (c.children) {
@@ -542,11 +549,13 @@ const SECTIONS = [], BY_ID = {}, SECTION_OF = {};
     } else { BY_ID[c.id] = c; SECTION_OF[c.id] = secName || ""; }
   }
 })(BOOK, "");
+SECTIONS.forEach(s => { SECTION_SIZE[s.name] = s.items.length; });
 const ORDER = SECTIONS.flatMap(s => s.items.map(i => i.id));
 
 /* ================= state ================= */
 const KEY = "igcse-python-v1";
-let state = { cur: ORDER[0], code: {}, done: {}, tried: {}, quiz: {}, className: "" };
+let state = { cur: ORDER[0], code: {}, done: {}, tried: {}, quiz: {},
+               className: "", studentName: "" };
 let memOnly = false;
 
 /* When this page is served by Google Apps Script, google.script.run is present
@@ -568,6 +577,7 @@ async function load(){
       who = (r && r.email) || "";
       if (r && r.state) { try { Object.assign(state, JSON.parse(r.state)); } catch (e) {} }
       if (r && r.className) state.className = r.className;
+      if (r && r.name) state.studentName = r.name;
       showWho();
     } catch (e) {
       memOnly = true;
@@ -594,7 +604,7 @@ function save(){
 }
 
 /* one row per student per challenge in the teacher's sheet */
-function report(id, outcome){
+function report(id, outcome, score){
   if (!REMOTE) return;
   const ch = BY_ID[id];
   gcall("recordResult", {
@@ -603,7 +613,11 @@ function report(id, outcome){
     challenge: ch ? ch.name : id,
     outcome: !!outcome,
     className: state.className || "",
+    studentName: state.studentName || "",
+    score: typeof score === "number" ? score : (outcome ? 1 : 0),
     order: ORDER.indexOf(id),
+    sectionSize: SECTION_SIZE[SECTION_OF[id]] || 0,
+    version: WORKBOOK_VERSION,
     code: (state.code[id] || "").slice(0, 4000),
   }).catch(() => { memOnly = true; });
 }
@@ -616,6 +630,7 @@ function setWho(text, bad){
 }
 
 /* ================= class ================= */
+const WORKBOOK_VERSION = "2026-09-08";
 const CLASSES = ["Ms. Doamekpor", "Ms. El Aoud", "Mr. Towner",
                  "Mr. Scarlett", "Mr. Mandhare"];
 
@@ -625,19 +640,48 @@ function askClass(){
   return new Promise(resolve => {
     const m = document.createElement("div");
     m.className = "modal";
-    m.innerHTML = '<div class="sheet" role="dialog" aria-label="Choose your class">' +
-      "<h2>Which class are you in?</h2>" +
-      '<p class="sub">Pick your teacher so your work reaches the right place. ' +
-      "You only have to do this once.</p><div class=\"pick\">" +
+    m.innerHTML = '<div class="sheet" role="dialog" aria-label="Your details">' +
+      "<h2>Before you start</h2>" +
+      '<p class="sub">Your teacher needs to know whose work this is. ' +
+      "You only have to do this once.</p>" +
+      '<label class="fieldlab" for="nameIn">Your full name</label>' +
+      '<input class="field" id="nameIn" maxlength="60" autocomplete="name" ' +
+      'placeholder="e.g. Minji Kim" value="' + esc(state.studentName || "") + '">' +
+      '<p class="fieldlab" style="margin-top:1.1em">Your class</p><div class="pick">' +
       CLASSES.map((c, i) => '<button data-i="' + i + '">' + esc(c) + "</button>").join("") +
-      "</div></div>";
+      '</div><p class="warn" id="nameWarn" hidden>Please type your name first.</p></div>';
     document.body.appendChild(m);
+    const nameIn = m.querySelector("#nameIn");
+    nameIn.focus();
     m.querySelectorAll(".pick button").forEach(b => {
       b.onclick = async () => {
+        const typed = nameIn.value.trim();
+        if (typed.length < 2) {
+          m.querySelector("#nameWarn").hidden = false;
+          nameIn.focus();
+          return;
+        }
+        state.studentName = typed;
         state.className = CLASSES[+b.dataset.i];
         m.remove();
         save();
-        if (REMOTE) { try { await gcall("saveClass", state.className); } catch (e) {} }
+        if (REMOTE) {
+          try {
+            await gcall("saveStudent", {
+              name: state.studentName,
+              className: state.className,
+              version: WORKBOOK_VERSION,
+            });
+          } catch (e) {
+            // silently losing this is what makes the teacher's Class column
+            // stay blank, so say so plainly instead
+            memOnly = true;
+            alert("Your class could not be saved.\n\n" +
+                  "Your work will still run, but it will not reach your " +
+                  "teacher. Please tell them, and show them this message:\n\n" +
+                  (e && e.message ? e.message : String(e)));
+          }
+        }
         showWho();
         resolve(state.className);
       };
@@ -647,9 +691,11 @@ function askClass(){
 
 function showWho(){
   const bits = [];
-  if (who) bits.push(who);
+  if (state.studentName) bits.push(state.studentName);
+  else if (who) bits.push(who);
   if (state.className) bits.push(state.className);
-  setWho(bits.join(" \u00b7 "));
+  if (REMOTE && memOnly) bits.push("not saving");
+  setWho(bits.join(" \u00b7 "), REMOTE && memOnly);
 }
 
 /* ================= markdown ================= */
@@ -1050,7 +1096,7 @@ async function doCheck(){
     pill.textContent = rs.filter(r => r.ok).length + "/" + rs.length;
     pill.className = "pill " + (pass ? "ok" : "no");
     if (pass) markDone(); else markTried();
-    report(state.cur, pass);
+    report(state.cur, pass, rs.filter(r => r.ok).length / rs.length);
     setView("res");
   } finally {
     busy = false; $("checkBtn").disabled = false; setStatus("ready");
@@ -1143,7 +1189,7 @@ function markQuiz(ch){
   $("qScore").textContent = right + " out of " + ch.quiz.length +
     (all ? " - section complete" : "");
   if (all) { markDone(); } else { markTried(); }
-  report(ch.id, all);
+  report(ch.id, all, right / ch.quiz.length);
 }
 
 /* ================= navigation ================= */
@@ -1217,7 +1263,8 @@ $("reportBtn").onclick = () => {
       (r.total ? Math.round(r.done / r.total * 100) : 0) + '%"></i></div></td><td class="n">' +
       r.done + " / " + r.total + "</td></tr>").join("") +
     "</tbody></table>" +
-    '<p class="sub">Class: <b>' + esc(state.className || "not chosen") + "</b></p>" +
+    '<p class="sub">' + esc(state.studentName || "no name") + " \u00b7 " +
+    esc(state.className || "no class") + "</p>" +
     '<div class="row"><button class="btn" id="mClose">Close</button>' +
     '<button class="btn" id="mClass">Change class</button>' +
     '<button class="btn" id="mWipe">Clear all progress</button></div></div>';
@@ -1228,9 +1275,9 @@ $("reportBtn").onclick = () => {
   $("mClass").onclick = () => { close(); askClass(); };
   $("mWipe").onclick = () => {
     if (!confirm("Clear all saved code and progress? This cannot be undone.")) return;
-    const keepClass = state.className;
+    const keepClass = state.className, keepName = state.studentName;
     state = { cur: ORDER[0], code: {}, done: {}, tried: {}, quiz: {},
-              className: keepClass };
+              className: keepClass, studentName: keepName };
     save(); close(); go(state.cur);
   };
 };
@@ -1243,7 +1290,7 @@ $("reportBtn").onclick = () => {
   showWho();
   // ask while the Python engine loads in the background
   const ready = boot();
-  if (!state.className) await askClass();
+  if (!state.className || !state.studentName) await askClass();
   await ready;
 })();
 </script>
